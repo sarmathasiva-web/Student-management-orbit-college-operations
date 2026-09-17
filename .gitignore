@@ -216,3 +216,493 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+const IMPORT_COLUMNS = ['name', 'register_number', 'email', 'phone', 'department', 'year', 'cgpa'];
+let importFile = null;
+let importRows = [];
+
+function openImportModal() {
+  $('importModal').classList.remove('hidden');
+  $('importModal').classList.add('flex');
+}
+
+function closeImportModal() {
+  $('importModal').classList.add('hidden');
+  $('importModal').classList.remove('flex');
+  resetImport();
+}
+
+function resetImport() {
+  importFile = null;
+  importRows = [];
+  $('importFile').value = '';
+  $('selectedFile').textContent = 'Supported format: .csv · Maximum file size: 5 MB';
+  $('previewPanel').classList.add('hidden');
+  $('importMessage').className = 'hidden rounded-xl px-4 py-2 text-sm font-semibold';
+  $('confirmImport').disabled = true;
+  $('previewTable').innerHTML = '';
+}
+
+function showImportMessage(message, error = true) {
+  const box = $('importMessage');
+  box.textContent = message;
+  box.className = `rounded-xl px-4 py-2 text-sm font-semibold ${error ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'}`;
+}
+
+function parseCsv(text) {
+  const rows = [];
+  let row = [];
+  let value = '';
+  let quoted = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    const next = text[index + 1];
+    if (character === '"' && quoted && next === '"') {
+      value += '"';
+      index += 1;
+    } else if (character === '"') {
+      quoted = !quoted;
+    } else if (character === ',' && !quoted) {
+      row.push(value.trim());
+      value = '';
+    } else if ((character === '\n' || character === '\r') && !quoted) {
+      if (character === '\r' && next === '\n') index += 1;
+      row.push(value.trim());
+      if (row.some(cell => cell !== '')) rows.push(row);
+      row = [];
+      value = '';
+    } else {
+      value += character;
+    }
+  }
+  if (value || row.length) {
+    row.push(value.trim());
+    if (row.some(cell => cell !== '')) rows.push(row);
+  }
+  if (quoted) throw new Error('The CSV contains an unfinished quoted value.');
+  return rows;
+}
+
+function validateImportRow(row, index, seenRegisters, seenEmails) {
+  const errors = [];
+  IMPORT_COLUMNS.forEach(field => {
+    if (!row[field]) errors.push(`${field} is required.`);
+  });
+  if (row.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(row.email)) errors.push('Enter a valid email address.');
+  if (row.phone && !/^\+?[0-9 ()-]{7,20}$/.test(row.phone)) errors.push('Enter a valid phone number.');
+  if (row.year && ![1, 2, 3, 4].includes(Number(row.year))) errors.push('Year must be between 1 and 4.');
+  if (row.cgpa && (Number.isNaN(Number(row.cgpa)) || Number(row.cgpa) < 0 || Number(row.cgpa) > 10)) errors.push('CGPA must be between 0 and 10.');
+  const register = row.register_number.toLowerCase();
+  const email = row.email.toLowerCase();
+  if (register && seenRegisters.has(register)) errors.push(`Duplicate register number: ${row.register_number}`);
+  if (email && seenEmails.has(email)) errors.push(`Duplicate email: ${row.email}`);
+  if (register && students.some(student => student.register_number.toLowerCase() === register)) errors.push(`Duplicate register number: ${row.register_number}`);
+  if (email && students.some(student => student.email.toLowerCase() === email)) errors.push(`Duplicate email: ${row.email}`);
+  return [...new Set(errors)];
+}
+
+async function inspectImportFile(file) {
+  if (!file) return;
+  if (!file.name.toLowerCase().endsWith('.csv')) return showImportMessage('Only .csv files are supported.');
+  if (!file.size) return showImportMessage('CSV file is empty.');
+  if (file.size > 5 * 1024 * 1024) return showImportMessage('CSV file must be 5 MB or smaller.');
+  try {
+    const rows = parseCsv(await file.text());
+    if (rows.length < 2) return showImportMessage('CSV file is empty.');
+    const headers = rows.shift().map(header => header.trim().toLowerCase());
+    const missing = IMPORT_COLUMNS.filter(column => !headers.includes(column));
+    if (missing.length) return showImportMessage(`Invalid CSV format. Missing required column: ${missing[0]}`);
+    importRows = rows.map(values => Object.fromEntries(IMPORT_COLUMNS.map(column => [column, (values[headers.indexOf(column)] || '').trim()])));
+    importFile = file;
+    $('selectedFile').textContent = `${file.name} · ${importRows.length} records ready for review`;
+    renderImportPreview();
+  } catch (error) {
+    showImportMessage(error.message || 'Unable to read this CSV file.');
+  }
+}
+
+function renderImportPreview() {
+  const registers = new Set();
+  const emails = new Set();
+  let valid = 0;
+  let invalid = 0;
+  let duplicates = 0;
+  $('previewTable').innerHTML = importRows.slice(0, 100).map((row, index) => {
+    const errors = validateImportRow(row, index, registers, emails);
+    const duplicate = errors.some(error => error.toLowerCase().includes('duplicate'));
+    registers.add(row.register_number.toLowerCase());
+    emails.add(row.email.toLowerCase());
+    if (errors.length) invalid += 1;
+    else valid += 1;
+    if (duplicate) duplicates += 1;
+    const status = errors.length ? duplicate ? 'Duplicate' : 'Review' : 'Valid';
+    const style = errors.length ? duplicate ? 'bg-amber-100 text-amber-700' : 'bg-red-100 text-red-700' : 'bg-emerald-100 text-emerald-700';
+    return `<tr class="border-t border-slate-100"><td class="px-4 py-3 font-semibold">${safe(row.name)}</td><td class="px-4 py-3">${safe(row.register_number)}</td><td class="px-4 py-3">${safe(row.department)}</td><td class="px-4 py-3">${safe(row.year)}</td><td class="px-4 py-3 font-bold">${safe(row.cgpa)}</td><td class="px-4 py-3"><span title="${safe(errors.join(' '))}" class="rounded-full px-2 py-1 text-xs font-bold ${style}">${status}</span></td></tr>`;
+  }).join('');
+  $('previewPanel').classList.remove('hidden');
+  $('previewCount').textContent = `${importRows.length} records found${importRows.length > 100 ? ' · showing first 100' : ''}`;
+  $('validCount').textContent = valid;
+  $('invalidCount').textContent = invalid;
+  $('duplicateCount').textContent = duplicates;
+  $('confirmImport').disabled = !importFile || valid === 0;
+}
+
+async function submitImport() {
+  if (!importFile) return;
+  const button = $('confirmImport');
+  button.disabled = true;
+  $('importProgress').classList.remove('hidden');
+  await new Promise(resolve => setTimeout(resolve, 250));
+  try {
+    const registers = new Set();
+    const emails = new Set();
+    const validRows = importRows.filter((row, index) => {
+      const errors = validateImportRow(row, index, registers, emails);
+      if (!errors.length) {
+        registers.add(row.register_number.toLowerCase());
+        emails.add(row.email.toLowerCase());
+        return true;
+      }
+      return false;
+    });
+    validRows.forEach(row => students.unshift({
+      ...row,
+      id: nextId(),
+      year: Number(row.year),
+      cgpa: Number(row.cgpa),
+      attendance: {
+        present: 0,
+        absent: 0,
+        percentage: 0
+      },
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    }));
+    if (!validRows.length) throw new Error('No valid records were available for import.');
+    addActivity('CSV imported', `Imported ${validRows.length} students from ${importFile.name}`);
+    refreshDashboard();
+    closeImportModal();
+    showToast(`✓ Import completed successfully. ${validRows.length} students imported.`);
+  } catch (error) {
+    showImportMessage(error.message || 'Unable to import this CSV file.');
+  } finally {
+    $('importProgress').classList.add('hidden');
+    if ($('importModal').classList.contains('flex')) button.disabled = false;
+  }
+}
+
+function downloadTemplate() {
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(new Blob([`${IMPORT_COLUMNS.join(',')}\n`], {
+    type: 'text/csv;charset=utf-8'
+  }));
+  link.download = 'student_template.csv';
+  link.click();
+  URL.revokeObjectURL(link.href);
+}
+
+$('importButton').onclick = openImportModal;
+$('importSide').onclick = openImportModal;
+$('heroImportButton').onclick = openImportModal;
+$('closeImport').onclick = closeImportModal;
+$('cancelImport').onclick = closeImportModal;
+$('templateButton').onclick = downloadTemplate;
+$('dropZone').onclick = () => $('importFile').click();
+$('importFile').onchange = event => inspectImportFile(event.target.files[0]);
+$('dropZone').ondragover = event => {
+  event.preventDefault();
+  $('dropZone').classList.add('border-violet-500');
+};
+$('dropZone').ondragleave = () => $('dropZone').classList.remove('border-violet-500');
+$('dropZone').ondrop = event => {
+  event.preventDefault();
+  $('dropZone').classList.remove('border-violet-500');
+  inspectImportFile(event.dataTransfer.files[0]);
+};
+$('confirmImport').onclick = submitImport;
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Orbit | College Operations</title>
+  <link rel="stylesheet" href="/theme.css">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/apexcharts"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+  <style>
+    h1,
+    h2,
+    h3,
+    h4 {
+      font-family: var(--font-heading);
+    }
+
+    .nav-active {
+      background: color-mix(in srgb, var(--color-primary) 13%, transparent);
+      color: var(--color-primary);
+    }
+
+    .glass {
+      background: color-mix(in srgb, var(--color-surface) 88%, transparent);
+      backdrop-filter: blur(18px);
+    }
+
+    .modal-backdrop {
+      background: rgba(8, 15, 31, .62);
+      backdrop-filter: blur(8px);
+    }
+
+    .dark body {
+      background: #0b1220;
+      color: #edf2ff;
+    }
+
+    .dark .light-card,
+    .dark header,
+    .dark aside,
+    .dark .modal-card {
+      background: #111a2c;
+      border-color: #26334c;
+    }
+
+    .dark .soft {
+      background: #172238;
+      border-color: #2b3954;
+    }
+
+    .dark .muted {
+      color: #98a8c4;
+    }
+
+    .dark table thead {
+      background: #172238;
+    }
+
+  </style>
+</head>
+
+<body>
+  <div class="min-h-screen lg:flex">
+    <aside id="sidebar" class="fixed inset-y-0 left-0 z-40 w-72 -translate-x-full border-r border-slate-200 bg-white p-6 transition-transform lg:static lg:translate-x-0">
+      <div class="mb-10 flex items-center gap-3">
+        <div class="grid h-11 w-11 place-items-center rounded-[var(--radius)] bg-[var(--color-primary)] text-xl font-bold text-white">O</div>
+        <div>
+          <div class="text-lg font-bold tracking-tight">Orbit</div>
+          <div class="text-xs muted text-[var(--color-muted)]">College operations</div>
+        </div>
+      </div>
+      <div class="mb-4 text-xs font-bold uppercase tracking-widest muted text-[var(--color-muted)]">Workspace</div>
+      <nav class="space-y-2">
+        <a class="nav-active flex items-center gap-3 rounded-[var(--radius)] px-4 py-3 text-sm font-semibold" href="#dashboard">⌂ <span>Dashboard</span></a>
+        <a class="flex items-center gap-3 rounded-[var(--radius)] px-4 py-3 text-sm font-semibold muted text-[var(--color-muted)] hover:bg-slate-50" href="#students">◈ <span>Students</span></a>
+        <button id="addSide" class="flex w-full items-center gap-3 rounded-[var(--radius)] px-4 py-3 text-left text-sm font-semibold muted text-[var(--color-muted)] hover:bg-slate-50">＋ <span>Add student</span></button>
+        <button id="importSide" class="flex w-full items-center gap-3 rounded-[var(--radius)] px-4 py-3 text-left text-sm font-semibold muted text-[var(--color-muted)] hover:bg-slate-50">⇧ <span>Import students</span></button>
+        <a class="flex items-center gap-3 rounded-[var(--radius)] px-4 py-3 text-sm font-semibold muted text-[var(--color-muted)] hover:bg-slate-50" href="#insights">◒ <span>Insights</span></a>
+        <a class="flex items-center gap-3 rounded-[var(--radius)] px-4 py-3 text-sm font-semibold muted text-[var(--color-muted)] hover:bg-slate-50" href="#activity">◷ <span>Activity log</span></a>
+      </nav>
+      <div class="absolute bottom-6 left-6 right-6 rounded-[var(--radius)] bg-slate-50 p-4 soft">
+        <div class="mb-2 flex items-center justify-between text-xs font-bold"><span>System health</span><span class="h-2 w-2 rounded-full bg-emerald-400"></span></div>
+        <p class="text-xs leading-5 muted text-[var(--color-muted)]">REST API, SQLite and live sync are ready.</p>
+      </div>
+    </aside>
+    <main class="min-w-0 flex-1">
+      <header class="glass sticky top-0 z-30 flex min-h-20 items-center justify-between border-b border-slate-200 px-5 md:px-10">
+        <div class="flex items-center gap-4"><button id="menu" class="text-2xl lg:hidden">☰</button>
+          <div>
+            <div class="text-xs font-semibold uppercase tracking-widest text-[var(--color-primary)]">Operations overview</div>
+            <h1 class="text-xl font-bold md:text-2xl">Good morning, administrator</h1>
+          </div>
+        </div>
+        <div class="flex items-center gap-3"><button id="themeToggle" class="rounded-xl border border-slate-200 px-3 py-2 text-sm soft">☾</button>
+          <div class="hidden h-10 w-10 place-items-center rounded-full bg-violet-100 font-bold text-violet-700 sm:grid">AD</div>
+          <div class="hidden text-sm md:block">
+            <div class="font-bold">Admin workspace</div>
+            <div class="text-xs muted text-[var(--color-muted)]">Local environment</div>
+          </div>
+        </div>
+      </header>
+      <div class="mx-auto max-w-[1600px] space-y-7 p-5 md:p-10">
+        <section id="dashboard" class="relative overflow-hidden rounded-[var(--radius)] bg-[var(--color-primary)] p-7 text-white shadow-2xl shadow-violet-200 md:p-10">
+          <div class="relative z-10 max-w-2xl">
+            <div class="mb-3 inline-flex rounded-full bg-white/15 px-3 py-1 text-xs font-bold uppercase tracking-widest">Live campus intelligence</div>
+            <h2 class="mb-3 text-3xl font-bold md:text-5xl">Make every student<br><span class="text-violet-200">count.</span></h2>
+            <p class="max-w-lg text-sm leading-6 text-violet-100">A single operating view for student records, academic signals and attendance health.</p>
+            <div class="mt-6 flex flex-wrap gap-3"><button id="addButton" class="rounded-xl bg-white px-5 py-3 text-sm font-bold text-violet-700 transition hover:-translate-y-0.5">＋ Add student</button><button id="heroImportButton" class="rounded-xl bg-white/15 px-5 py-3 text-sm font-bold text-white ring-1 ring-white/30 hover:bg-white/25">📥 Import CSV</button><button id="exportButton" class="rounded-xl bg-white/15 px-5 py-3 text-sm font-bold text-white ring-1 ring-white/30 hover:bg-white/25">↓ Export CSV</button></div>
+          </div>
+          <div class="absolute -right-16 -top-24 h-72 w-72 rounded-full border-[35px] border-white/10"></div>
+          <div class="absolute -bottom-40 right-24 h-72 w-72 rounded-full border-[35px] border-white/10"></div>
+        </section>
+        <section class="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
+          <div class="light-card rounded-[var(--radius)] bg-white p-5 shadow-sm">
+            <div class="mb-5 flex justify-between text-sm muted text-[var(--color-muted)]"><span>Total students</span><span>✦</span></div>
+            <div id="total" class="text-3xl font-bold">—</div>
+            <div class="mt-2 text-xs text-emerald-600">Live database count</div>
+          </div>
+          <div class="light-card rounded-[var(--radius)] bg-white p-5 shadow-sm">
+            <div class="mb-5 flex justify-between text-sm muted text-[var(--color-muted)]"><span>Average CGPA</span><span>↗</span></div>
+            <div id="averageCgpa" class="text-3xl font-bold">—</div>
+            <div class="mt-2 text-xs muted text-[var(--color-muted)]">Across all years</div>
+          </div>
+          <div class="light-card rounded-[var(--radius)] bg-white p-5 shadow-sm">
+            <div class="mb-5 flex justify-between text-sm muted text-[var(--color-muted)]"><span>Attendance</span><span>◷</span></div>
+            <div id="averageAttendance" class="text-3xl font-bold">—</div>
+            <div class="mt-2 text-xs text-emerald-600">Campus average</div>
+          </div>
+          <div class="light-card rounded-[var(--radius)] bg-white p-5 shadow-sm">
+            <div class="mb-5 flex justify-between text-sm muted text-[var(--color-muted)]"><span>Year 1 / 2</span><span>01—02</span></div>
+            <div id="year12" class="text-3xl font-bold">—</div>
+            <div class="mt-2 text-xs muted text-[var(--color-muted)]">Early cohorts</div>
+          </div>
+          <div class="light-card rounded-[var(--radius)] bg-white p-5 shadow-sm">
+            <div class="mb-5 flex justify-between text-sm muted text-[var(--color-muted)]"><span>Year 3 / 4</span><span>03—04</span></div>
+            <div id="year34" class="text-3xl font-bold">—</div>
+            <div class="mt-2 text-xs muted text-[var(--color-muted)]">Senior cohorts</div>
+          </div>
+        </section>
+        <section id="insights" class="grid gap-6 xl:grid-cols-3">
+          <div class="light-card rounded-[var(--radius)] bg-white p-6 shadow-sm xl:col-span-2">
+            <div class="flex items-center justify-between">
+              <div>
+                <h2 class="text-xl font-bold">Student analytics</h2>
+                <p class="mt-1 text-sm muted text-[var(--color-muted)]">Distribution across departments and academic bands.</p>
+              </div><span class="rounded-full bg-emerald-100 px-3 py-1 text-xs font-bold text-emerald-700">Live</span>
+            </div>
+            <div id="departmentChart" class="mt-4"></div>
+          </div>
+          <div class="light-card rounded-[var(--radius)] bg-white p-6 shadow-sm">
+            <h2 class="text-xl font-bold">CGPA spectrum</h2>
+            <p class="mt-1 text-sm muted text-[var(--color-muted)]">Academic performance bands.</p>
+            <div id="cgpaChart" class="mt-4"></div>
+          </div>
+        </section>
+        <section id="students" class="light-card rounded-[var(--radius)] bg-white shadow-sm">
+          <div class="flex flex-col gap-5 border-b border-slate-100 p-6 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <h2 class="text-xl font-bold">Student directory</h2>
+              <p class="mt-1 text-sm muted text-[var(--color-muted)]">Search, segment, sort and manage your complete student database.</p>
+            </div>
+            <div class="flex flex-wrap gap-2"><button id="importButton" class="rounded-xl border border-slate-200 px-4 py-3 text-sm font-bold soft">📥 Import CSV</button><input id="importFile" type="file" accept=".csv" class="hidden"><button id="clear" class="rounded-xl border border-slate-200 px-4 py-3 text-sm font-semibold muted soft text-[var(--color-muted)]">Reset filters</button></div>
+          </div>
+          <div class="grid gap-3 p-5 md:grid-cols-2 xl:grid-cols-5"><input id="search" class="soft rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none" placeholder="Search name, ID or email..."><select id="department" class="soft rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none">
+              <option value="">All departments</option>
+              <option>Computer Science</option>
+              <option>AI & ML</option>
+              <option>Electronics</option>
+              <option>Mechanical</option>
+              <option>Civil</option>
+            </select><select id="year" class="soft rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none">
+              <option value="">All years</option>
+              <option value="1">Year 1</option>
+              <option value="2">Year 2</option>
+              <option value="3">Year 3</option>
+              <option value="4">Year 4</option>
+            </select><input id="minCgpa" type="number" min="0" max="10" step="0.1" class="soft rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none" placeholder="Min CGPA"><input id="maxCgpa" type="number" min="0" max="10" step="0.1" class="soft rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none" placeholder="Max CGPA"></div>
+          <div id="status" class="hidden mx-5 mb-4 rounded-xl bg-red-50 p-4 text-sm text-red-700"></div>
+          <div id="loading" class="hidden p-12 text-center text-sm muted text-[var(--color-muted)]">Loading live student records…</div>
+          <div class="overflow-x-auto">
+            <table class="w-full min-w-[1050px] text-left text-sm">
+              <thead class="bg-slate-50 text-xs uppercase tracking-wider muted text-[var(--color-muted)]">
+                <tr>
+                  <th class="px-6 py-4">ID</th>
+                  <th class="px-4 py-4">Student</th>
+                  <th class="px-4 py-4">Register number</th>
+                  <th class="px-4 py-4">Department</th>
+                  <th class="px-4 py-4">Year</th>
+                  <th class="px-4 py-4">CGPA</th>
+                  <th class="px-4 py-4">Attendance</th>
+                  <th class="px-4 py-4">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="table"></tbody>
+            </table>
+          </div>
+          <div id="empty" class="hidden p-16 text-center">
+            <div class="mx-auto mb-4 grid h-16 w-16 place-items-center rounded-full bg-violet-100 text-2xl text-violet-600">◈</div>
+            <h3 class="text-lg font-bold">Your directory is ready</h3>
+            <p class="mx-auto mt-2 max-w-sm text-sm muted text-[var(--color-muted)]">No students match these filters yet. Add the first record to begin.</p><button id="emptyAdd" class="mt-5 rounded-xl bg-[var(--color-primary)] px-5 py-3 text-sm font-bold text-white">Add first student</button>
+          </div>
+          <div class="flex items-center justify-between border-t border-slate-100 p-5 text-sm"><span id="pageInfo" class="muted text-[var(--color-muted)]">Showing 0 students</span>
+            <div class="flex gap-2"><button id="prev" class="rounded-lg border border-slate-200 px-3 py-2 soft">←</button><button id="next" class="rounded-lg border border-slate-200 px-3 py-2 soft">→</button></div>
+          </div>
+        </section>
+        <section id="activity" class="light-card rounded-[var(--radius)] bg-white p-6 shadow-sm">
+          <div class="flex items-center justify-between">
+            <div>
+              <h2 class="text-xl font-bold">Recent activity</h2>
+              <p class="mt-1 text-sm muted text-[var(--color-muted)]">A transparent operational history.</p>
+            </div><span class="rounded-full bg-violet-100 px-3 py-1 text-xs font-bold text-violet-700">Audit trail</span>
+          </div>
+          <div id="activityList" class="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-4"></div>
+        </section>
+      </div>
+    </main>
+  </div>
+  <div id="modal" class="modal-backdrop fixed inset-0 z-50 hidden items-center justify-center p-4">
+    <div class="modal-card w-full max-w-2xl rounded-[var(--radius)] bg-white p-7 shadow-2xl">
+      <div class="mb-6 flex items-start justify-between">
+        <div>
+          <div class="text-xs font-bold uppercase tracking-widest text-[var(--color-primary)]">Directory record</div>
+          <h2 id="modalTitle" class="mt-1 text-2xl font-bold">Add student</h2>
+        </div><button id="close" class="text-2xl text-slate-400">×</button>
+      </div>
+      <div id="formError" class="mb-4 hidden rounded-xl bg-red-50 p-3 text-sm text-red-700"></div>
+      <form id="form" class="grid gap-4 sm:grid-cols-2"><label class="text-sm font-semibold">Full name<input name="name" required class="mt-2 w-full rounded-xl border border-slate-200 px-4 py-3"></label><label class="text-sm font-semibold">Register number<input name="register_number" required class="mt-2 w-full rounded-xl border border-slate-200 px-4 py-3"></label><label class="text-sm font-semibold">Email<input name="email" type="email" required class="mt-2 w-full rounded-xl border border-slate-200 px-4 py-3"></label><label class="text-sm font-semibold">Phone<input name="phone" required pattern="[+0-9 ()-]{7,20}" class="mt-2 w-full rounded-xl border border-slate-200 px-4 py-3"></label><label class="text-sm font-semibold">Department<select name="department" required class="mt-2 w-full rounded-xl border border-slate-200 px-4 py-3">
+            <option value="">Choose department</option>
+            <option>Computer Science</option>
+            <option>AI & ML</option>
+            <option>Electronics</option>
+            <option>Mechanical</option>
+            <option>Civil</option>
+          </select></label><label class="text-sm font-semibold">Year<select name="year" required class="mt-2 w-full rounded-xl border border-slate-200 px-4 py-3">
+            <option value="">Choose year</option>
+            <option value="1">Year 1</option>
+            <option value="2">Year 2</option>
+            <option value="3">Year 3</option>
+            <option value="4">Year 4</option>
+          </select></label><label class="text-sm font-semibold sm:col-span-2">CGPA<input name="cgpa" type="number" min="0" max="10" step="0.01" required class="mt-2 w-full rounded-xl border border-slate-200 px-4 py-3"></label>
+        <div class="flex justify-end gap-3 sm:col-span-2"><button type="button" id="cancel" class="rounded-xl border border-slate-200 px-5 py-3 text-sm font-bold">Cancel</button><button class="rounded-xl bg-[var(--color-primary)] px-5 py-3 text-sm font-bold text-white" type="submit">Save record</button></div>
+      </form>
+    </div>
+  </div>
+  <div id="importModal" class="modal-backdrop fixed inset-0 z-50 hidden items-center justify-center overflow-y-auto p-4">
+    <div class="modal-card w-full max-w-4xl rounded-[var(--radius)] bg-white p-6 shadow-2xl md:p-8">
+      <div class="mb-6 flex items-start justify-between">
+        <div>
+          <div class="text-xs font-bold uppercase tracking-widest text-[var(--color-primary)]">Bulk data workflow</div>
+          <h2 class="mt-1 text-2xl font-bold">Import Students from CSV</h2>
+          <p class="mt-2 text-sm text-[var(--color-muted)]">Validate your records before they reach the student directory.</p>
+        </div>
+        <button id="closeImport" class="text-2xl text-slate-400" aria-label="Close import dialog">×</button>
+      </div>
+      <div id="dropZone" class="cursor-pointer rounded-[var(--radius)] border-2 border-dashed border-violet-200 bg-violet-50/60 p-8 text-center transition hover:border-violet-400">
+        <div class="mx-auto mb-3 grid h-14 w-14 place-items-center rounded-2xl bg-white text-2xl shadow-sm">📄</div>
+        <p class="font-bold">Drop CSV file here</p>
+        <p class="mt-1 text-sm text-[var(--color-muted)]">or click to browse</p>
+        <p id="selectedFile" class="mt-3 text-xs font-semibold text-[var(--color-primary)]">Supported format: .csv · Maximum file size: 5 MB</p>
+      </div>
+      <div class="mt-4 flex flex-wrap items-center justify-between gap-3">
+        <button id="templateButton" class="text-sm font-bold text-[var(--color-primary)]">↓ Download CSV Template</button>
+        <div id="importMessage" class="hidden rounded-xl px-4 py-2 text-sm font-semibold"></div>
+      </div>
+      <div id="previewPanel" class="mt-6 hidden">
+        <div class="mb-4 flex flex-wrap items-end justify-between gap-3">
+          <div><h3 class="text-lg font-bold">Import Preview</h3><p id="previewCount" class="mt-1 text-sm text-[var(--color-muted)]"></p></div>
+          <div class="flex gap-2 text-xs font-bold"><span class="rounded-full bg-emerald-100 px-3 py-2 text-emerald-700">Valid: <b id="validCount">0</b></span><span class="rounded-full bg-red-100 px-3 py-2 text-red-700">Invalid: <b id="invalidCount">0</b></span><span class="rounded-full bg-amber-100 px-3 py-2 text-amber-700">Duplicates: <b id="duplicateCount">0</b></span></div>
+        </div>
+        <div class="max-h-64 overflow-auto rounded-xl border border-slate-100"><table class="w-full min-w-[650px] text-left text-sm"><thead class="sticky top-0 bg-slate-50 text-xs uppercase tracking-wider text-[var(--color-muted)]"><tr><th class="px-4 py-3">Name</th><th class="px-4 py-3">Register No.</th><th class="px-4 py-3">Department</th><th class="px-4 py-3">Year</th><th class="px-4 py-3">CGPA</th><th class="px-4 py-3">Status</th></tr></thead><tbody id="previewTable"></tbody></table></div>
+        <div id="importProgress" class="mt-4 hidden"><div class="flex justify-between text-xs font-bold"><span>Importing students...</span><span>Please wait...</span></div><div class="mt-2 h-2 overflow-hidden rounded-full bg-slate-100"><div class="h-full w-2/3 animate-pulse rounded-full bg-[var(--color-primary)]"></div></div></div>
+        <div class="mt-6 flex justify-end gap-3"><button id="cancelImport" class="rounded-xl border border-slate-200 px-5 py-3 text-sm font-bold">Cancel</button><button id="confirmImport" class="rounded-xl bg-[var(--color-primary)] px-5 py-3 text-sm font-bold text-white disabled:opacity-50" disabled>Import Students</button></div>
+      </div>
+    </div>
+  </div>
+  <div id="toast" class="fixed bottom-6 right-6 z-[60] hidden rounded-xl bg-slate-900 px-5 py-4 text-sm font-semibold text-white shadow-xl"></div>
+  <script src="/js/app.js"></script>
+  <script src="/js/import.js"></script>
+</body>
+
+</html>
+DJANGO_DEBUG=True
+DJANGO_SECRET_KEY=replace-this-in-production
+DJANGO_ALLOWED_HOSTS=127.0.0.1,localhost
